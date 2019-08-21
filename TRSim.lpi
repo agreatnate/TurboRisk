@@ -51,9 +51,16 @@
       <Version Value="2"/>
     </PublishOptions>
     <RunParams>
+      <local>
+        <CommandLineParams Value="-g 1 -M 3 -m 2 -a australian.trp -a simple.trp alexander.trp -S"/>
+      </local>
       <FormatVersion Value="2"/>
       <Modes Count="1">
-        <Mode0 Name="default"/>
+        <Mode0 Name="default">
+          <local>
+            <CommandLineParams Value="-g 1 -M 3 -m 2 -a australian.trp -a simple.trp alexander.trp -S"/>
+          </local>
+        </Mode0>
       </Modes>
     </RunParams>
     <RequiredPackages Count="3">

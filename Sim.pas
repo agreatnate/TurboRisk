@@ -8,6 +8,7 @@ uses
   LCLIntf, LCLType, LMessages, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
   Dialogs, ComCtrls, StdCtrls, Globals, ExtCtrls, Buttons{, EdisCustom};
 
+
 type
   TfSim = class(TForm)
     pgcSim: TPageControl;
@@ -58,7 +59,6 @@ type
     cmdAnalyseCPULog: TBitBtn;
     procedure CheckParameters;
     procedure WriteHelp;
-
     procedure FormShow(Sender: TObject);
     procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
@@ -66,6 +66,7 @@ type
       State: TDragState; var Accept: Boolean);
     procedure lstTRPDragDrop(Sender, Source: TObject; X, Y: Integer);
     procedure cmdStartClick(Sender: TObject);
+    procedure runSimulation(showRun: Boolean; AlwaysPlayers, RandomPlayers :TStringArray);
     procedure txtGameLogFileCustomDlg(Sender: TObject);
     procedure txtCPULogFileCustomDlg(Sender: TObject);
     procedure cmdAnalyseCPULogClick(Sender: TObject);
@@ -90,52 +91,171 @@ implementation
 uses IniFiles, StrUtils, DateUtils, {StdPas,} SimRun, SimMap, Stats, Territ,
   SimCPULog, SimGameLog;
 
+function StringsToArray(L: TStrings): TStringArray;
+var
+  i: Integer;
+begin
+  SetLength(Result, L.Count);
+  for i := 0 to L.Count - 1 do
+    Result[i] := L[i];
+end;
+
+procedure shuffle(L:TStringArray);
+var
+  i,k : integer;
+  tmp: String;
+begin
+  for i := length(L)-1 downto 1 do begin
+    k := random(i+1);
+    tmp := L[i]; L[i] := L[k]; L[k] := tmp
+  end
+end;
+
 procedure TfSim.FormShow(Sender: TObject);
 begin
-  if ParamCount > 0 then begin
-    CheckParameters;  //Check to see if TRSim was called with parameters
-    Halt;
-  end
-  else begin
-    bG_TRSim := true; // main is TRSim
-    Setup; // generic TurboRisk setup in globals
-    PopulateMapList;
-    SimSetup; // TRSim specific setup
-    Caption := 'TRSim ' + sG_AppVers;
-    Application.HelpFile := sG_AppPath + 'TurboRisk.chm';
-    PopulateTRPList;
-    pgcSim.ActivePage := tbsSim;
-  end;
+  bG_TRSim := true; // main is TRSim
+  Setup; // generic TurboRisk setup in globals
+  sG_AppName := 'TRSim'; // overrides the name set in Globals
+  PopulateMapList;
+  SimSetup; // TRSim specific setup
+  Caption := 'TRSim ' + sG_AppVers;
+  Application.HelpFile := sG_AppPath + 'TurboRisk.chm';
+  PopulateTRPList;
+  pgcSim.ActivePage := tbsSim;
 end;
 
 procedure TfSim.CheckParameters;
 var
-  I : Integer;
-  params : TStringList;
-  longOpts : array [1..1] of string = ('help');
+  I,IP : Integer;
+  AlwaysPlayers : TStringArray;
+  RandomPlayers : TStringArray;
+  longOpts : array [1..7] of string = ('help','games:','minplayers:','maxplayers:','show-map','showstats','always');
   ErrorMsg : string;
 begin
-  params := TStringList.create;
-  ErrorMsg := Application.CheckOptions('hg:mMsS','help games: minplayers maxplayers show-map showstats');
+  bG_TRSim := true; // main is TRSim
+  Setup; // generic TurboRisk setup in globals
+  sG_AppName := 'TRSim'; // overrides the name set in Globals
+  ErrorMsg := Application.CheckOptions('hg:m:M:l:L:t:T:sSa:','help games: minplayers: maxplayers: show-map showstats always:');
   if ErrorMsg.length > 0 then begin
     WriteLn(ErrorMsg);
     WriteHelp;
     Halt;
   end;
-  Application.GetNonOptions('hl:',longOpts,params);
-  for I := 0 to params.count - 1 do begin
-    WriteLn(params[I]);
-  end;
   if Application.HasOption('h','help') then begin
     WriteHelp;
     Halt;
   end;
+  if Application.HasOption('g','games') then begin
+    iSimGames := StrToIntDef(Application.GetOptionValue('g','games'), 0);
+  end
+  else begin
+    iSimGames := 1;
+  end;
+  if Application.HasOption('m','minplayers') then begin
+    iSimMinPl := StrToIntDef(Application.GetOptionValue('m','minplayers'), 0);
+  end
+  else begin
+    iSimMinPl := 2;
+  end;
+  if Application.HasOption('M','maxplayers') then begin
+    iSimMaxPl := StrToIntDef(Application.GetOptionValue('M','maxplayers'), 0);
+  end
+  else begin
+    iSimMaxPl := 8;
+  end;
+  if Application.HasOption('t','turn-limit') then begin
+    iSimTurnLimit := StrToIntDef(Application.GetOptionValue('t','turn-limit'), 0);
+  end
+  else begin
+    iSimTurnLimit := 0;
+  end;
+  if Application.HasOption('T','time-limit') then begin
+    iSimTimeLimit := StrToIntDef(Application.GetOptionValue('T','time-limit'), 0);
+  end
+  else begin
+    iSimTimeLimit := 0;
+  end;
+  if Application.HasOption('l','game-log') then begin
+    sSimGameLogFile := Application.GetOptionValue('l','game-log');
+  end
+  else begin
+    sSimGameLogFile := 'game_log.sgl';
+  end;
+  if Application.HasOption('L','CPU-log') then begin
+    sSimCPULogFile := Application.GetOptionValue('L','CPU-log');
+  end
+  else begin
+    sSimCPULogFile := 'cpu_usage_log.scl';
+  end;
+  // validity check
+  if iSimGames <= 0 then begin
+    WriteLn('Invalid number of games.');
+    Halt;
+  end;
+  if (iSimMinPl < 2) or (iSimMaxPl > 10) or (iSimMaxPl < iSimMinPl) then begin
+    WriteLn('Invalid number of players. Min=2, max=10');
+    Halt;
+  end;
+  // prepare players
+  lstRandom.Sorted := false;
+  for iP := 1 to MAXPLAYERS do begin
+    arPlayer[iP].Computer := true;
+    arPlayer[iP].KeepLog := false;
+  end;
+  if Application.HasOption('a','always') then begin
+    AlwaysPlayers := Application.GetOptionValues('a','always');
+    for I:=0 to length(AlwaysPlayers) -1 do begin
+       if FileExists(sG_AppPath + 'players' + PathDelim + ChangeFileExt(AlwaysPlayers[I], '') + '.trp') then begin
+          WriteLn('Found player ' + AlwaysPlayers[I] +' will always be included.');
+       end
+       else begin
+          WriteLn('TRP player ' + AlwaysPlayers[I] +' not found.');
+          Halt;
+       end;
+    end;
+  end;
+  RandomPlayers := Application.GetNonOptions('hg:m:M:l:L:t:T:sSa:',longOpts);
+  for I:=0 to length(RandomPlayers) -1 do begin
+    if FileExists(sG_AppPath + 'players' + PathDelim + ChangeFileExt(RandomPlayers[I], '') + '.trp') then begin
+      WriteLn('Found player ' + RandomPlayers[I] +' will randomly be included.');
+    end
+    else begin
+      WriteLn('TRP player ' + RandomPlayers[I] +' not found.');
+      Halt;
+    end;
+  end;
+  if length(AlwaysPlayers) > iSimMinPl then begin
+    WriteLn(
+      'The number of TRPs in the "always" list is greater then the minimum number of players per game.');
+    Halt;
+  end;
+  if length(AlwaysPlayers) + length(RandomPlayers) < iSimMaxPl then begin
+    WriteLn(
+      'The total number of TRPs in the "always" and "random" lists is not large enough to reach the maximum number of players per game.');
+    Halt;
+  end;
+  // show map if requested
+  if Application.HasOption('s','show-map') then begin
+    WriteLn('Showing Map');
+    sMapFile := cboMap.Text;
+    LoadMap;
+    fSimMap.Show;
+  end;
+  // show stats if requested
+  if Application.HasOption('S','show-stats') then
+    fStats.Show;
+  WriteLn('Running Sim...');
+  Setup;
+  runSimulation(false,AlwaysPlayers,RandomPlayers);
+  Halt;
 end;
 
 
 procedure TfSim.WriteHelp;
 begin
-  WriteLn('TRSim can be called with parameters to run in non-interactive mode.  If called without paremeters then the GUI is displayed.');
+  WriteLn('TRSim can be called with parameters to run in non-interactive mode.');
+  WriteLn('If called without paremeters then the GUI is displayed.');
+  WriteLn('Usage: TRSim [Options] players');
   WriteLn('Available Parameters:');
   WriteLn(#9'-h --help'#9'Display this help.');
   WriteLn(#9'-g --games'#9'Number of games to play (Default=1).');
@@ -143,21 +263,10 @@ begin
   WriteLn(#9'-M --maxplayers'#9'Maximum number of players in a game (Default=8).');
   WriteLn(#9'-s --show-map'#9'Show the map (Hidden by default).');
   WriteLn(#9'-S --show-stats'#9'Show the stats (Hidden by default).');
-
-{        txtGames.Text := IntToStr(ReadInteger('Params', 'Games', 0));
-      txtMinPlayers.Text := IntToStr(ReadInteger('Params', 'MinPlayers', 2));
-      txtMaxPlayers.Text := IntToStr(ReadInteger('Params', 'MaxPlayers', 10));
-      chkShowMap.Checked := ReadBool('Params', 'ShowMap', true);
-      cboMap.ItemIndex := cboMap.Items.IndexOf(ReadString('Params', 'Map', 'std_map_small.trm'));
-      chkShowStats.Checked := ReadBool('Params', 'ShowStats', true);
-      chkErrorDump.Checked := ReadBool('Params', 'ErrorDump', true);
-      chkErrorAbort.Checked := ReadBool('Params', 'ErrorAbort', true);
-      txtGameLogFile.Text := ReadString('Params', 'GameLog', 'game_log.sgl');
-      txtCPULogFile.Text := ReadString('Params', 'CPULog', 'cpu_usage_log.scl');
-      txtGameLogFile2.Text := txtGameLogFile.Text;
-      txtCPULogFile2.Text := txtCPULogFile.Text;
-      txtTurnLimit.Text := IntToStr(ReadInteger('Params', 'TurnLimit', 0));
-      txtTimeLimit.Text := IntToStr(ReadInteger('Params', 'TimeLimit', 0)); }
+  WriteLn(#9'-l --game-log file'#9'Game Log File (default=game_log.sgl).');
+  WriteLn(#9'-L --CPU-log file'#9'CPU Log File (default=cpu_usage_log.scl).');
+  WriteLn(#9'-t --turn-limit file'#9'Turn limit (default=0).');
+  WriteLn(#9'-T --time-limit file'#9'Time limit (default=0).');
 end;
 
 
@@ -236,10 +345,6 @@ var
   IniFile: TIniFile;
   i, n: Integer;
 begin
-
-  // generic global vars
-  sG_AppName := 'TRSim'; // overrides the name set in Globals
-
   // clear programs lists
   lstAlways.Items.Clear;
   lstRandom.Items.Clear;
@@ -466,19 +571,45 @@ begin
     fSimRun.Show;
   // start simulation
   Screen.Cursor := crHourGlass;
-  try
+  RunSimulation(true,StringstoArray(lstAlways.items),StringstoArray(lstRandom.items));
+  // last update of stats
+  fSimRun.UpdateSimStats;
+  if bSimAbort then
+    fSimRun.SimLog('*** Simulation aborted by user ***')
+  else
+    fSimRun.SimLog('*** Simulation ends ***');
+  // enable main form again
+  fSim.Enabled := true;
+  // close/disable controls
+  fSimRun.cmdStop.Enabled := false;
+  fSimRun.cmdAbortGame.Enabled := false;
+  fSimRun.BorderIcons := [biSystemMenu];
+  fSimMap.Close;
+  fStats.Close;
+  Screen.Cursor := crDefault;
+  lstRandom.Sorted := true;
+end;
+
+procedure TfSim.RunSimulation(showRun: Boolean; AlwaysPlayers : TStringArray; RandomPlayers : TStringArray);
+var
+  IP, i : Integer;
+begin
     // init vars
     iSimCurr := 0;
     iSimCompl := 0;
     bSimAbort := false;
     dtSimStartTime := Now;
-    fSimRun.prbGames.Max := iSimGames;
-    fSimRun.prbGames.Position := 0;
+    if showRun then begin
+      fSimRun.prbGames.Max := iSimGames;
+      fSimRun.prbGames.Position := 0;
+    end;
     // main simulation loop
     repeat
       inc(iSimCurr);
-      fSimRun.UpdateSimStats;
-      fSimRun.SimLog('Game #' + IntToStr(iSimCurr) + ' started');
+      if showRun then begin
+        fSimRun.UpdateSimStats;
+        fSimRun.SimLog('Game #' + IntToStr(iSimCurr) + ' started');
+      end;
       // reset players
       for iP := 1 to MAXPLAYERS do
         arPlayer[iP].Active := false;
@@ -486,26 +617,23 @@ begin
       iSimPlayers := iSimMinPl + random(iSimMaxPl - iSimMinPl + 1);
       // take players from the "always" list first
       iP := 0;
-      for i := 0 to lstAlways.Count - 1 do begin
+      for i := 0 to length(AlwaysPlayers) - 1 do begin
         if iP < iSimPlayers then begin
           inc(iP);
           arPlayer[iP].Active := true;
-          arPlayer[iP].PrgFile := lstAlways.Items[i];
-          arPlayer[iP].Name := ChangeFileExt(lstAlways.Items[i], '');
+          arPlayer[iP].PrgFile := AlwaysPlayers[i];
+          arPlayer[iP].Name := ChangeFileExt(AlwaysPlayers[i], '');
         end;
       end;
       // then take players from the "random" list, if any
-      if lstRandom.Count > 0 then begin
-        for i := 1 to 100 do begin // "shuffle" random list
-          lstRandom.Items.Exchange(random(lstRandom.Count),
-            random(lstRandom.Count));
-        end;
-        for i := 0 to lstRandom.Count - 1 do begin
+      if length(RandomPlayers) > 0 then begin
+        shuffle(RandomPlayers);
+        for i := 0 to length(RandomPlayers) - 1 do begin
           if iP < iSimPlayers then begin
             inc(iP);
             arPlayer[iP].Active := true;
-            arPlayer[iP].PrgFile := lstRandom.Items[i];
-            arPlayer[iP].Name := ChangeFileExt(lstRandom.Items[i], '');
+            arPlayer[iP].PrgFile := RandomPlayers[i];
+            arPlayer[iP].Name := ChangeFileExt(RandomPlayers[i], '');
           end;
         end;
       end;
@@ -516,23 +644,45 @@ begin
       Supervisor;
       iSimGameTime := SecondsBetween(Now, dtSimGameTime);
       // update log
-      case uSimStatus of
-        ssComplete:
-          fSimRun.SimLog('Game #' + IntToStr(iSimCurr)
-            + ' completed in ' + FormatDateTime('hh:nn:ss',
-              Now - dtSimGameTime) + ', ' + IntToStr(iTurnCounter)
-            + ' turns, winner is ' + arPlayer[iSimWinner].Name);
-        ssError:
-          fSimRun.SimLog('Game #' + IntToStr(iSimCurr)
-            + ' aborted for TRP error');
-        ssTurnLimit:
-          fSimRun.SimLog('Game #' + IntToStr(iSimCurr) +
-            ' aborted, turn limit reached');
-        ssTimeLimit:
-          fSimRun.SimLog('Game #' + IntToStr(iSimCurr) +
-            ' aborted, time limit reached');
-        ssAbort:
-          fSimRun.SimLog('Game #' + IntToStr(iSimCurr) + ' aborted by user');
+      if showRun then begin
+        case uSimStatus of
+          ssComplete:
+            fSimRun.SimLog('Game #' + IntToStr(iSimCurr)
+              + ' completed in ' + FormatDateTime('hh:nn:ss',
+                Now - dtSimGameTime) + ', ' + IntToStr(iTurnCounter)
+              + ' turns, winner is ' + arPlayer[iSimWinner].Name);
+          ssError:
+            fSimRun.SimLog('Game #' + IntToStr(iSimCurr)
+              + ' aborted for TRP error');
+          ssTurnLimit:
+            fSimRun.SimLog('Game #' + IntToStr(iSimCurr) +
+              ' aborted, turn limit reached');
+          ssTimeLimit:
+            fSimRun.SimLog('Game #' + IntToStr(iSimCurr) +
+              ' aborted, time limit reached');
+          ssAbort:
+            fSimRun.SimLog('Game #' + IntToStr(iSimCurr) + ' aborted by user');
+        end;
+      end
+      else begin
+        case uSimStatus of
+          ssComplete:
+            WriteLn('Game #' + IntToStr(iSimCurr)
+              + ' completed in ' + FormatDateTime('hh:nn:ss',
+                Now - dtSimGameTime) + ', ' + IntToStr(iTurnCounter)
+              + ' turns, winner is ' + arPlayer[iSimWinner].Name);
+          ssError:
+            WriteLn('Game #' + IntToStr(iSimCurr)
+              + ' aborted for TRP error');
+          ssTurnLimit:
+            WriteLn('Game #' + IntToStr(iSimCurr) +
+              ' aborted, turn limit reached');
+          ssTimeLimit:
+            WriteLn('Game #' + IntToStr(iSimCurr) +
+              ' aborted, time limit reached');
+          ssAbort:
+            WriteLn('Game #' + IntToStr(iSimCurr) + ' aborted by user');
+        end;
       end;
       // log game data
       UpdateHistoryFile;
@@ -542,24 +692,6 @@ begin
       if not bSimAbort then
         inc(iSimCompl);
     until (iSimCompl = iSimGames) or bSimAbort;
-  finally
-    // last update of stats
-    fSimRun.UpdateSimStats;
-    if bSimAbort then
-      fSimRun.SimLog('*** Simulation aborted by user ***')
-    else
-      fSimRun.SimLog('*** Simulation ends ***');
-    // enable main form again
-    fSim.Enabled := true;
-    // close/disable controls
-    fSimRun.cmdStop.Enabled := false;
-    fSimRun.cmdAbortGame.Enabled := false;
-    fSimRun.BorderIcons := [biSystemMenu];
-    fSimMap.Close;
-    fStats.Close;
-    Screen.Cursor := crDefault;
-    lstRandom.Sorted := true;
-  end;
 end;
 
 procedure TfSim.LogCPU;
